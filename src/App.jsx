@@ -14,6 +14,7 @@ import {
   DEFAULT_CONSTRAINTS, routeTimeMin, haversineDistance,
 } from './utils/clustering.js';
 import { fetchRoadGeometry } from './utils/routing.js';
+import { openReport, saveReportAsPng } from './utils/report.js';
 
 const SAMPLE_ADDRESSES = [
   '1 Apple Park Way, Cupertino, CA',
@@ -44,13 +45,41 @@ export default function App() {
   // coordCache: Map<address string, {lat, lng, displayName}>
   // Populated when importing the "address | N | E" format. Bypasses geocoding.
   const [coordCache, setCoordCache] = useState(new Map());
+
+  // geoCache: persistent Map<"provider:address", {lat, lng, displayName}>
+  // Survives page reloads via localStorage. Skips API calls for known addresses.
+  const [geoCache, setGeoCache] = useState(() => {
+    try {
+      const raw = localStorage.getItem('geocode_cache');
+      return raw ? new Map(JSON.parse(raw)) : new Map();
+    } catch { return new Map(); }
+  });
+
+  const persistGeoCache = (map) => {
+    try { localStorage.setItem('geocode_cache', JSON.stringify([...map])); } catch {}
+  };
+
+  const addToGeoCache = (key, value) => {
+    setGeoCache((prev) => {
+      const next = new Map(prev);
+      next.set(key, value);
+      persistGeoCache(next);
+      return next;
+    });
+  };
+
+  const clearGeoCache = () => {
+    setGeoCache(new Map());
+    localStorage.removeItem('geocode_cache');
+  };
   const [clusters, setClusters] = useState([]);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
   const [errors, setErrors] = useState([]);
 
   const [constraints, setConstraints] = useState(DEFAULT_CONSTRAINTS);
-  const [pricing, setPricing] = useState({ baseKm: 5, basePrice: 50000, extraPerKm: 10000 });
+  const [pricing, setPricing] = useState({ baseKm: 5, basePrice: 15000, extraPerKm: 5000 });
 
   const [provider, setProvider] = useState(
     () => localStorage.getItem('geocoder_provider') ?? PROVIDERS.GOONG
@@ -203,31 +232,55 @@ export default function App() {
     // Geocode start address (depot)
     let resolvedDepot = null;
     if (startAddress.trim()) {
-      setStatus('Geocoding start address…');
-      try {
-        const result = await doGeocode(startAddress.trim());
-        resolvedDepot = { ...result, address: startAddress.trim() };
-      } catch (err) {
-        setErrors([{ address: startAddress.trim(), error: `Start address: ${err.message}` }]);
+      const depotKey = `${provider}:${startAddress.trim()}`;
+      if (geoCache.has(depotKey)) {
+        setStatus('Start address loaded from cache.');
+        resolvedDepot = { ...geoCache.get(depotKey), address: startAddress.trim() };
+      } else {
+        setStatus('Geocoding start address…');
+        try {
+          const result = await doGeocode(startAddress.trim());
+          addToGeoCache(depotKey, result);
+          resolvedDepot = { ...result, address: startAddress.trim() };
+        } catch (err) {
+          setErrors([{ address: startAddress.trim(), error: `Start address: ${err.message}` }]);
+        }
       }
     }
 
     // Geocode customer addresses
     const geocoded = [];
     const failedAddresses = [];
+    let cacheHits = 0;
 
     for (let i = 0; i < addresses.length; i++) {
-      if (coordCache.has(addresses[i])) {
+      const addr = addresses[i];
+
+      // Priority 1: manually imported coordinates
+      if (coordCache.has(addr)) {
         setStatus(`Reading coordinates ${i + 1} of ${addresses.length}…`);
-        geocoded.push({ ...coordCache.get(addresses[i]), address: addresses[i] });
+        geocoded.push({ ...coordCache.get(addr), address: addr });
+        cacheHits++;
         continue;
       }
-      setStatus(`Geocoding address ${i + 1} of ${addresses.length}…`);
+
+      // Priority 2: persistent geocode cache
+      const cacheKey = `${provider}:${addr}`;
+      if (geoCache.has(cacheKey)) {
+        setStatus(`Cache hit ${i + 1} of ${addresses.length}…`);
+        geocoded.push({ ...geoCache.get(cacheKey), address: addr });
+        cacheHits++;
+        continue;
+      }
+
+      // Priority 3: API call
+      setStatus(`Geocoding ${i + 1} of ${addresses.length}…`);
       try {
-        const result = await doGeocode(addresses[i]);
-        geocoded.push({ ...result, address: addresses[i] });
+        const result = await doGeocode(addr);
+        addToGeoCache(cacheKey, result);
+        geocoded.push({ ...result, address: addr });
       } catch (err) {
-        failedAddresses.push({ address: addresses[i], error: err.message });
+        failedAddresses.push({ address: addr, error: err.message });
       }
     }
 
@@ -337,9 +390,38 @@ export default function App() {
     <div className="flex h-screen bg-gray-100 overflow-hidden">
       {/* Sidebar */}
       <div className="w-96 flex-shrink-0 bg-white shadow-lg flex flex-col overflow-hidden">
-        <div className="bg-blue-700 px-4 py-4 text-white flex-shrink-0">
-          <h1 className="text-lg font-bold">Delivery Cluster Planner</h1>
-          <p className="text-blue-200 text-xs mt-0.5">Group addresses by proximity for efficient delivery</p>
+        <div className="flex-shrink-0 text-white" style={{ background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)' }}>
+          <div className="px-5 py-4">
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="text-xl">🚚</span>
+              <h1 className="text-base font-bold tracking-tight">Route Optimizer</h1>
+            </div>
+            <p className="text-blue-200 text-xs leading-relaxed">
+              Cluster stops · plan routes · estimate time &amp; cost
+            </p>
+          </div>
+          {clusters.length > 0 && (
+            <div className="flex divide-x divide-white/20 border-t border-white/20 text-center text-xs">
+              <div className="flex-1 py-2">
+                <p className="font-semibold">{clusters.length}</p>
+                <p className="text-blue-200 text-[10px]">shippers</p>
+              </div>
+              <div className="flex-1 py-2">
+                <p className="font-semibold">{clusters.reduce((s, c) => s + c.points.length, 0)}</p>
+                <p className="text-blue-200 text-[10px]">stops</p>
+              </div>
+              <div className="flex-1 py-2">
+                <p className="font-semibold">{clusters.reduce((s, c) => s + (c.routeDistance ?? 0), 0).toFixed(1)} km</p>
+                <p className="text-blue-200 text-[10px]">total dist</p>
+              </div>
+              <div className="flex-1 py-2">
+                <p className="font-semibold">
+                  {clusters.reduce((s, c) => s + pricing.basePrice + Math.max(0, (c.routeDistance ?? 0) - pricing.baseKm) * pricing.extraPerKm, 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </p>
+                <p className="text-blue-200 text-[10px]">total cost</p>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -455,7 +537,22 @@ export default function App() {
 
           {/* Geocoding provider */}
           <section className="border-t pt-4">
-            <h2 className="text-sm font-semibold text-gray-700 mb-2">Geocoding Provider</h2>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-sm font-semibold text-gray-700">Geocoding Provider</h2>
+              {geoCache.size > 0 && (
+                <span className="flex items-center gap-1.5 text-xs text-green-600">
+                  <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
+                  {geoCache.size} cached
+                  <button
+                    onClick={clearGeoCache}
+                    className="text-gray-400 hover:text-red-500 transition-colors ml-0.5"
+                    title="Clear geocode cache"
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+            </div>
 
             <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-medium">
               {Object.values(PROVIDERS).map((p) => (
@@ -534,7 +631,27 @@ export default function App() {
 
           {/* Cluster summary */}
           {clusters.length > 0 && (
-            <section className="border-t pt-4">
+            <section className="border-t pt-4 space-y-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    setReportLoading(true);
+                    await saveReportAsPng(clusters, depot, constraints, pricing);
+                    setReportLoading(false);
+                  }}
+                  disabled={reportLoading}
+                  className="flex-1 py-2 bg-gray-800 text-white rounded-lg text-sm font-medium hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {reportLoading ? 'Generating…' : 'Save Report as PNG'}
+                </button>
+                <button
+                  onClick={() => openReport(clusters, depot, constraints, pricing)}
+                  className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
+                  title="Preview in browser"
+                >
+                  Preview
+                </button>
+              </div>
               <ClusterSummary clusters={clusters} constraints={constraints} pricing={pricing} />
             </section>
           )}

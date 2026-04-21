@@ -1,3 +1,4 @@
+import html2canvas from 'html2canvas';
 import { routeTimeMin } from './clustering.js';
 
 const CLUSTER_COLORS = [
@@ -16,11 +17,36 @@ function fmtPrice(amount) {
 }
 
 function calcPrice(distanceKm, pricing) {
-  const extra = Math.max(0, distanceKm - pricing.baseKm);
-  return pricing.basePrice + extra * pricing.extraPerKm;
+  return pricing.basePrice + Math.max(0, distanceKm - pricing.baseKm) * pricing.extraPerKm;
 }
 
-export function openReport(clusters, depot, constraints, pricing) {
+// ─── Shared styles injected into both the window and the hidden PNG container ──
+const STYLES = `
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body, .root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f3f4f6; color: #111; }
+  .page { max-width: 860px; margin: 32px auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.10); overflow: hidden; }
+  .header { background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%); color: #fff; padding: 28px 32px; }
+  .header h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+  .header p  { font-size: 12px; opacity: 0.7; margin-top: 4px; }
+  .section   { padding: 24px 32px; }
+  .section + .section { border-top: 1px solid #e5e7eb; }
+  .section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #6b7280; margin-bottom: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .stat  { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; }
+  .stat-label { font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.06em; }
+  .stat-value { font-size: 18px; font-weight: 700; color: #111; margin-top: 2px; }
+  .constraints { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: #6b7280; }
+  .constraints span strong { color: #374151; }
+  tr:nth-child(even) td { background: #f9fafb; }
+  @media print {
+    body { background: #fff; }
+    .page { box-shadow: none; margin: 0; border-radius: 0; }
+    .print-btn { display: none !important; }
+  }
+`;
+
+// ─── Build the inner HTML shared by both the window and PNG render ─────────────
+function buildPageHtml(clusters, depot, constraints, pricing) {
   const totalStops  = clusters.reduce((s, c) => s + c.points.length, 0);
   const totalKm     = clusters.reduce((s, c) => s + (c.routeDistance ?? 0), 0);
   const prices      = clusters.map((c) => calcPrice(c.routeDistance ?? 0, pricing));
@@ -30,25 +56,15 @@ export function openReport(clusters, depot, constraints, pricing) {
     routeTimeMin(c.routeDistance ?? 0, c.points.length, constraints)
   );
   const bottleneckIdx = times.indexOf(Math.max(...times));
-
   const now = new Date().toLocaleString();
 
   const shipperRows = clusters.map((cluster, idx) => {
-    const color    = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
-    const timeMin  = times[idx];
-    const price    = prices[idx];
-    const extraKm  = Math.max(0, (cluster.routeDistance ?? 0) - pricing.baseKm);
-    const over     = timeMin > constraints.maxTimeMin;
+    const color   = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
+    const timeMin = times[idx];
+    const price   = prices[idx];
+    const extraKm = Math.max(0, (cluster.routeDistance ?? 0) - pricing.baseKm);
+    const over    = timeMin > constraints.maxTimeMin;
     const isBottle = idx === bottleneckIdx;
-
-    const stopsList = (cluster.orderedPoints?.length
-      ? cluster.orderedPoints
-      : cluster.points
-    ).map((p, i) => `
-        <tr>
-          <td style="padding:6px 12px;color:#888;width:32px;text-align:center;font-size:12px;">${i + 1}</td>
-          <td style="padding:6px 12px;font-size:13px;color:#222;">${p.address}</td>
-        </tr>`).join('');
 
     const badge = over
       ? `<span style="margin-left:8px;background:rgba(255,255,255,0.25);border-radius:99px;padding:2px 8px;font-size:11px;">⚠ over budget</span>`
@@ -56,8 +72,16 @@ export function openReport(clusters, depot, constraints, pricing) {
       ? `<span style="margin-left:8px;background:rgba(255,255,255,0.25);border-radius:99px;padding:2px 8px;font-size:11px;">slowest</span>`
       : '';
 
+    const stopsList = (cluster.orderedPoints?.length ? cluster.orderedPoints : cluster.points)
+      .map((p, i) => `
+        <tr>
+          <td style="padding:6px 12px;color:#888;width:32px;text-align:center;font-size:12px;">${i + 1}</td>
+          <td style="padding:6px 12px;font-size:13px;color:#222;">${p.address}</td>
+        </tr>`)
+      .join('');
+
     return `
-    <div style="margin-bottom:24px;border-radius:10px;overflow:hidden;border:2px solid ${color};${over ? 'border-color:#ef4444;' : ''}">
+    <div style="margin-bottom:24px;border-radius:10px;overflow:hidden;border:2px solid ${over ? '#ef4444' : color};">
       <div style="background:${over ? '#ef4444' : color};color:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;">
         <span style="font-weight:700;font-size:14px;">
           Shipper ${idx + 1} — ${cluster.points.length} stop${cluster.points.length !== 1 ? 's' : ''}${badge}
@@ -70,46 +94,12 @@ export function openReport(clusters, depot, constraints, pricing) {
         Base ${pricing.baseKm} km: ${fmtPrice(pricing.basePrice)}
         ${extraKm > 0 ? `&nbsp;+&nbsp; ${extraKm.toFixed(1)} km × ${fmtPrice(pricing.extraPerKm)} = ${fmtPrice(extraKm * pricing.extraPerKm)}` : ''}
       </div>
-      <table style="width:100%;border-collapse:collapse;">
-        <tbody>${stopsList}
-        </tbody>
-      </table>
+      <table style="width:100%;border-collapse:collapse;"><tbody>${stopsList}</tbody></table>
     </div>`;
   }).join('');
 
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Delivery Plan Report</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f3f4f6; color: #111; }
-    .page { max-width: 860px; margin: 32px auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.10); overflow: hidden; }
-    .header { background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%); color: #fff; padding: 28px 32px; }
-    .header h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
-    .header p  { font-size: 12px; opacity: 0.7; margin-top: 4px; }
-    .section   { padding: 24px 32px; }
-    .section + .section { border-top: 1px solid #e5e7eb; }
-    .section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #6b7280; margin-bottom: 14px; }
-    .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
-    .stat  { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; }
-    .stat-label { font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.06em; }
-    .stat-value { font-size: 18px; font-weight: 700; color: #111; margin-top: 2px; }
-    .constraints { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: #6b7280; }
-    .constraints span strong { color: #374151; }
-    tr:nth-child(even) td { background: #f9fafb; }
-    @media print {
-      body { background: #fff; }
-      .page { box-shadow: none; margin: 0; border-radius: 0; }
-      .print-btn { display: none !important; }
-    }
-  </style>
-</head>
-<body>
+  return `
 <div class="page">
-
   <div class="header">
     <h1>Delivery Plan Report</h1>
     <p>Generated: ${now}${depot ? `&nbsp;&nbsp;·&nbsp;&nbsp;Hub: ${depot.address}` : ''}</p>
@@ -142,19 +132,75 @@ export function openReport(clusters, depot, constraints, pricing) {
     <div class="section-title">Routes</div>
     ${shipperRows}
   </div>
+</div>`;
+}
 
-  <div class="section" style="text-align:center;">
-    <button class="print-btn" onclick="window.print()"
-      style="background:#2563eb;color:#fff;border:none;border-radius:8px;padding:10px 28px;font-size:14px;font-weight:600;cursor:pointer;">
-      Print / Save as PDF
-    </button>
-  </div>
-
+// ─── Open in new browser tab (with Print button) ───────────────────────────────
+export function openReport(clusters, depot, constraints, pricing) {
+  const pageHtml = buildPageHtml(clusters, depot, constraints, pricing);
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Delivery Plan Report</title>
+  <style>${STYLES}</style>
+</head>
+<body>
+${pageHtml}
+<div style="max-width:860px;margin:16px auto 40px;text-align:center;">
+  <button class="print-btn" onclick="window.print()"
+    style="background:#2563eb;color:#fff;border:none;border-radius:8px;padding:10px 28px;font-size:14px;font-weight:600;cursor:pointer;">
+    Print / Save as PDF
+  </button>
 </div>
 </body>
 </html>`;
-
   const win = window.open('', '_blank');
   win.document.write(html);
   win.document.close();
+}
+
+// ─── Render to PNG and trigger download ───────────────────────────────────────
+export async function saveReportAsPng(clusters, depot, constraints, pricing) {
+  const pageHtml = buildPageHtml(clusters, depot, constraints, pricing);
+
+  // Mount a hidden off-screen container so html2canvas can measure and render it
+  const wrapper = document.createElement('div');
+  wrapper.className = 'root';
+  wrapper.style.cssText = `
+    position: fixed; top: -99999px; left: -99999px;
+    width: 900px; padding: 32px; background: #f3f4f6;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  `;
+
+  // Inject styles into a <style> tag inside the wrapper so html2canvas picks them up
+  const styleEl = document.createElement('style');
+  styleEl.textContent = STYLES;
+  wrapper.appendChild(styleEl);
+
+  const contentEl = document.createElement('div');
+  contentEl.innerHTML = pageHtml;
+  wrapper.appendChild(contentEl);
+
+  document.body.appendChild(wrapper);
+
+  try {
+    const canvas = await html2canvas(wrapper, {
+      scale: 2,           // 2× resolution for crisp text
+      useCORS: true,
+      backgroundColor: '#f3f4f6',
+      width: 900,
+      windowWidth: 900,
+      logging: false,
+    });
+
+    const date = new Date().toISOString().split('T')[0];
+    const link = document.createElement('a');
+    link.download = `delivery-report-${date}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  } finally {
+    document.body.removeChild(wrapper);
+  }
 }

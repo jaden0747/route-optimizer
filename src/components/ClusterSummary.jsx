@@ -20,7 +20,7 @@ function fmtPrice(amount) {
   return amount.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
-const DEFAULT_PRICING = { baseKm: 5, basePrice: 50000, extraPerKm: 10000 };
+const DEFAULT_PRICING = { baseKm: 2, basePrice: 15000, extraPerKm: 5000 };
 
 export default function ClusterSummary({ clusters, constraints = DEFAULT_CONSTRAINTS, pricing = DEFAULT_PRICING }) {
   if (clusters.length === 0) return null;
