@@ -150,9 +150,10 @@ export default function ClusterSummary({ clusters, constraints = DEFAULT_CONSTRA
             )}
 
             <ul className="text-xs text-gray-700 divide-y divide-gray-100">
-              {cluster.points.map((p, i) => (
-                <li key={i} className="px-3 py-1.5 truncate" title={p.address}>
-                  {p.address}
+              {(cluster.orderedPoints?.length ? cluster.orderedPoints : cluster.points).map((p, i) => (
+                <li key={i} className="px-3 py-1.5 flex items-center gap-2" title={p.address}>
+                  <span className="flex-shrink-0 w-4 text-right text-gray-400">{i + 1}.</span>
+                  <span className="truncate">{p.address}</span>
                 </li>
               ))}
             </ul>
