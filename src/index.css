@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Fix leaflet z-index issues */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+}
