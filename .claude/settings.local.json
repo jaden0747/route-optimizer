@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm create:*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(npm install:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.goong.io)"
+    ]
+  }
+}
