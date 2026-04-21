@@ -20,6 +20,12 @@ A browser-based delivery route planning tool. Paste or import customer addresses
 
 ---
 
+## Live demo
+
+https://YOUR_USERNAME.github.io/route-optimizer/
+
+---
+
 ## Requirements
 
 - **Node.js** ≥ 18 — https://nodejs.org
